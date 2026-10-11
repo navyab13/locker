@@ -13,35 +13,37 @@ function verify_password(string $password, string $stored): bool
     return hash_equals($stored, hash_password($password));
 }
 
-function reset_token_for(string $email, ?string $day = null): string
-{
-    $day = $day ?? gmdate("Y-m-d");
-    return sha1(strtolower($email) . "|" . $day);
-}
+// function reset_token_for(string $email, ?string $day = null): string
+// {
+//     $day = $day ?? gmdate("Y-m-d");
+//     return sha1(strtolower($email) . "|" . $day);
+// }
 
 function issue_reset_token(string $email): string
 {
-    $token = reset_token_for($email);
+    $token = bin2hex(random_bytes(32)); #random 32 bytes, unpredictable
     $pdo = db();
     $pdo->prepare("DELETE FROM reset_tokens WHERE email = ?")->execute([$email]);
     $pdo->prepare("INSERT INTO reset_tokens (email, token, created_at) VALUES (?, ?, datetime('now'))")
         ->execute([$email, $token]);
+    error_log("[locker] password reset token for {$email}: {$token} (valid 1 hour)");
     return $token;
 }
 
 function consume_reset_token(string $email, string $token): bool
 {
-    $expected = reset_token_for($email);
-    if (!hash_equals($expected, $token)) {
+    $pdo = db();
+    $stmt = $pdo->prepare("SELECT token, created_at FROM reset_tokens WHERE email = ?");
+    $stmt->execute([$email]);
+    $row = $stmt->fetch();
+    if (!$row) {
         return false;
     }
-    $pdo = db();
-    $row = $pdo->prepare("SELECT token FROM reset_tokens WHERE email = ?");
-    $row->execute([$email]);
-    $stored = $row->fetchColumn();
-    if (!$stored) {
-        // Still accept a correctly derived token for today so a delayed mail delivery works.
-        return true;
+    if (!hash_equals((string)$row["token"], $token)) {
+        return false;
     }
-    return hash_equals((string)$stored, $token);
+    $issuedAt = strtotime($row["created_at"] . " UTC");
+    $expired = $issuedAt === false || (time() - $issuedAt) > 3600; #token expiration
+    $pdo->prepare("DELETE FROM reset_tokens WHERE email = ?")->execute([$email]);
+    return !$expired;
 }
